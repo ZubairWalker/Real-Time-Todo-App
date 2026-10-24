@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real-Time Collaborative TODO</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel Standalone for JSX transformation in browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Socket.IO client served automatically by the Socket.IO server -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased selection:bg-indigo-500 selection:text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    const WORKSPACE = "default";
+    const API_URL = "/api/todos";
+
+    // Random generator for default usernames
+    const getRandomName = () => {
+      const names = ["Alex", "Jordan", "Taylor", "Morgan", "Sam", "Casey", "Riley", "Robin"];
+      const randNum = Math.floor(100 + Math.random() * 900);
+      return `${names[Math.floor(Math.random() * names.length)]}-${randNum}`;
+    };
+
+    function App() {
+      // User Profile & Workspace
+      const [username, setUsername] = useState(() => localStorage.getItem("todo_username") || getRandomName());
+      const [isEditingUsername, setIsEditingUsername] = useState(false);
+      const [tempUsername, setTempUsername] = useState(username);
+
+      // Connection & Presence
+      const [isConnected, setIsConnected] = useState(false);
+      const [presence, setPresence] = useState({ online: 1, users: [] });
+      const [dbStatus, setDbStatus] = useState("checking");
+
+      // Todos State
+      const [todos, setTodos] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [filter, setFilter] = useState("all"); // "all" | "active" | "completed"
+      const [priorityFilter, setPriorityFilter] = useState("all");
+
+      // New Todo Form State
+      const [newTitle, setNewTitle] = useState("");
+      const [newPriority, setNewPriority] = useState("MEDIUM");
+      const [newDueDate, setNewDueDate] = useState("");
+      const [isSubmitting, setIsSubmitting] = useState(false);
+
+      // Typing Indicator (Bonus)
+      const [typingUser, setTypingUser] = useState(null);
+      const typingTimeoutRef = useRef(null);
+      const isTypingLocalRef = useRef(false);
+
+      // Activity History (Bonus)
+      const [activities, setActivities] = useState([]);
+
+      // Socket reference
+      const socketRef = useRef(null);
+
+      const addActivity = (text, type = "info") => {
+        const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setActivities((prev) => [{ id: Math.random(), text, time, type }, ...prev.slice(0, 19)]);
+      };
+
+      // 1. Initial REST Fetch: Load todos from DB
+      const fetchTodos = async () => {
+        try {
+          const res = await fetch(API_URL);
+          const data = await res.json();
+          if (data.success && Array.isArray(data.data)) {
+            setTodos(data.data);
+          }
+        } catch (err) {
+          console.error("Failed to fetch todos:", err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Check DB Health
+      const checkHealth = async () => {
+        try {
+          const res = await fetch("/api/health");
+          const data = await res.json();
+          setDbStatus(data.database === "connected" ? "connected" : "disconnected");
+        } catch {
+          setDbStatus("disconnected");
+        }
+      };
+
+      // 2. Initialize Socket.IO connection & event listeners
+      useEffect(() => {
+        fetchTodos();
+        checkHealth();
+
+        // Connect to the Socket.IO server on same host/port
+        const socket = io();
+        socketRef.current = socket;
+
+        socket.on("connect", () => {
+          setIsConnected(true);
+          console.log("Connected to Socket.IO server with ID:", socket.id);
+
+          // Emit workspace:join
+          socket.emit("workspace:join", {
+            workspace: WORKSPACE,
+            username: username,
+          });
+        });
+
+        socket.on("disconnect", () => {
+          setIsConnected(false);
+          console.log("Disconnected from Socket.IO server");
+        });
+
+        // Real-time Event: Presence Update
+        socket.on("presence:update", (payload) => {
+          console.log("Received presence:update", payload);
+          setPresence({
+            online: payload.online,
+            users: payload.users || [],
+          });
+        });
+
+        // Real-time Event: Todo Created
+        socket.on("todo:created", (newTodo) => {
+          console.log("Received todo:created", newTodo);
+          setTodos((prev) => {
+            // Deduplicate in case client already has it
+            if (prev.some((t) => t._id === newTodo._id)) return prev;
+            return [newTodo, ...prev];
+          });
+          addActivity(`Added todo "${newTodo.title}"`, "create");
+        });
+
+        // Real-time Event: Todo Updated
+        socket.on("todo:updated", (updatedTodo) => {
+          console.log("Received todo:updated", updatedTodo);
+          setTodos((prev) =>
+            prev.map((t) => (t._id === updatedTodo._id ? updatedTodo : t))
+          );
+          const statusText = updatedTodo.completed ? "marked as completed" : "updated";
+          addActivity(`Updated "${updatedTodo.title}" (${statusText})`, "update");
+        });
+
+        // Real-time Event: Todo Deleted
+        socket.on("todo:deleted", ({ id }) => {
+          console.log("Received todo:deleted", id);
+          setTodos((prev) => {
+            const found = prev.find((t) => t._id === id);
+            if (found) {
+              addActivity(`Deleted "${found.title}"`, "delete");
+            }
+            return prev.filter((t) => t._id !== id);
+          });
+        });
+
+        // Real-time Event: Typing Indicator (Bonus)
+        socket.on("typing:update", ({ username: typingAuthor, isTyping }) => {
+          if (isTyping) {
+            setTypingUser(typingAuthor);
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            typingTimeoutRef.current = setTimeout(() => {
+              setTypingUser(null);
+            }, 2500);
+          } else {
+            setTypingUser(null);
+          }
+        });
+
+        return () => {
+          socket.disconnect();
+        };
+      }, []);
+
+      // Handle updating username and re-announcing to presence
+      const handleSaveUsername = () => {
+        const trimmed = tempUsername.trim();
+        if (!trimmed) return;
+        setUsername(trimmed);
+        localStorage.setItem("todo_username", trimmed);
+        setIsEditingUsername(false);
+
+        if (socketRef.current && socketRef.current.connected) {
+          socketRef.current.emit("workspace:join", {
+            workspace: WORKSPACE,
+            username: trimmed,
+          });
+        }
+      };
+
+      // Handle input change and typing notification
+      const handleTitleChange = (e) => {
+        const val = e.target.value;
+        setNewTitle(val);
+
+        if (socketRef.current && socketRef.current.connected) {
+          if (val.trim().length > 0) {
+            if (!isTypingLocalRef.current) {
+              isTypingLocalRef.current = true;
+              socketRef.current.emit("typing", {
+                workspace: WORKSPACE,
+                isTyping: true,
+                username,
+              });
+            }
+          } else {
+            if (isTypingLocalRef.current) {
+              isTypingLocalRef.current = false;
+              socketRef.current.emit("typing", {
+                workspace: WORKSPACE,
+                isTyping: false,
+                username,
+              });
+            }
+          }
+        }
+      };
+
+      // 3. REST Action: Create Todo
+      const handleCreateTodo = async (e) => {
+        e.preventDefault();
+        const trimmed = newTitle.trim();
+        if (!trimmed) return;
+
+        setIsSubmitting(true);
+        try {
+          // Tell others typing stopped
+          if (socketRef.current && isTypingLocalRef.current) {
+            isTypingLocalRef.current = false;
+            socketRef.current.emit("typing", {
+              workspace: WORKSPACE,
+              isTyping: false,
+              username,
+            });
+          }
+
+          const res = await fetch(API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: trimmed,
+              priority: newPriority,
+              dueDate: newDueDate ? new Date(newDueDate).toISOString() : null,
+            }),
+          });
+
+          const data = await res.json();
+          if (data.success) {
+            setNewTitle("");
+            setNewDueDate("");
+            // Note: The UI can update either immediately or via the socket broadcast!
+            // Updating via socket ensures 100% synchronization with other tabs!
+          } else {
+            alert(data.error || "Failed to create todo");
+          }
+        } catch (err) {
+          alert("Error connecting to server");
+        } finally {
+          setIsSubmitting(false);
+        }
+      };
+
+      // 4. REST Action: Toggle Complete
+      const handleToggleTodo = async (todo) => {
+        try {
+          const res = await fetch(`${API_URL}/${todo._id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ completed: !todo.completed }),
+          });
+          const data = await res.json();
+          if (!data.success) {
+            alert(data.error || "Failed to update todo");
+          }
+        } catch (err) {
+          alert("Network error updating todo");
+        }
+      };
+
+      // 5. REST Action: Delete Todo
+      const handleDeleteTodo = async (id) => {
+        try {
+          const res = await fetch(`${API_URL}/${id}`, {
+            method: "DELETE",
+          });
+          const data = await res.json();
+          if (!data.success && data.error) {
+            alert(data.error || "Failed to delete todo");
+          }
+        } catch (err) {
+          alert("Network error deleting todo");
+        }
+      };
+
+      // Filtered todos calculation
+      const filteredTodos = useMemo(() => {
+        return todos.filter((todo) => {
+          if (filter === "active" && todo.completed) return false;
+          if (filter === "completed" && !todo.completed) return false;
+          if (priorityFilter !== "all" && todo.priority !== priorityFilter) return false;
+          return true;
+        });
+      }, [todos, filter, priorityFilter]);
+
+      const counts = useMemo(() => {
+        const total = todos.length;
+        const completed = todos.filter((t) => t.completed).length;
+        const active = total - completed;
+        return { total, completed, active };
+      }, [todos]);
+
+      const getPriorityBadgeClass = (priority) => {
+        switch (priority) {
+          case "HIGH":
+            return "bg-rose-500/10 text-rose-400 border border-rose-500/20";
+          case "LOW":
+            return "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+          default:
+            return "bg-amber-500/10 text-amber-400 border border-amber-500/20";
+        }
+      };
+
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+          {/* Header Bar */}
+          <header className="flex flex-col md:flex-row md:items-center md:justify-between pb-6 border-b border-slate-800 gap-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <span className="flex h-3 w-3 relative">
+                  {isConnected && (
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  )}
+                  <span
+                    className={`relative inline-flex rounded-full h-3 w-3 ${
+                      isConnected ? "bg-emerald-500" : "bg-rose-500"
+                    }`}
+                  ></span>
+                </span>
+                <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+                  <span>Collaborative TODO</span>
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    Real-time
+                  </span>
+                </h1>
+              </div>
+              <p className="text-slate-400 text-sm mt-1">
+                Room: <code className="text-indigo-400 font-mono">workspace:default</code> • REST writes with instant Socket.IO broadcasts
+              </p>
+            </div>
+
+            {/* User Presence & Identity Card */}
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Online Users Pill */}
+              <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl text-sm">
+                <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
+                <span className="font-semibold text-emerald-400">{presence.online}</span>
+                <span className="text-slate-400">online</span>
+              </div>
+
+              {/* Username Tag / Editor */}
+              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-sm">
+                {isEditingUsername ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      className="bg-slate-800 text-white px-2 py-0.5 rounded text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      value={tempUsername}
+                      onChange={(e) => setTempUsername(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && handleSaveUsername()}
+                      autoFocus
+                    />
+                    <button
+                      onClick={handleSaveUsername}
+                      className="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded text-white font-medium"
+                    >
+                      Save
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 text-xs">You:</span>
+                    <span className="font-medium text-slate-200">{username}</span>
+                    <button
+                      onClick={() => {
+                        setTempUsername(username);
+                        setIsEditingUsername(true);
+                      }}
+                      className="text-slate-500 hover:text-slate-300 text-xs underline ml-1"
+                    >
+                      edit
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </header>
+
+          {/* Database Notice if MongoDB disconnected */}
+          {dbStatus === "disconnected" && (
+            <div className="mt-4 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm flex items-start gap-3">
+              <span className="text-lg">⚠️</span>
+              <div>
+                <p className="font-semibold">MongoDB Atlas Credentials Notice</p>
+                <p className="text-amber-200/80 text-xs mt-0.5">
+                  The server is waiting for your database connection. Please update <code className="bg-amber-950/60 px-1 py-0.5 rounded font-mono">.env</code> with your MongoDB username (<code className="font-mono">MONGO_URI=mongodb+srv://&lt;username&gt;:...</code>).
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Online Users Avatar List */}
+          {presence.users.length > 0 && (
+            <div className="mt-4 flex items-center gap-2 overflow-x-auto py-1">
+              <span className="text-xs text-slate-400 font-medium">In this room:</span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {presence.users.map((user, idx) => (
+                  <span
+                    key={idx}
+                    className={`inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full border ${
+                      user === username
+                        ? "bg-indigo-500/10 text-indigo-300 border-indigo-500/30 font-medium"
+                        : "bg-slate-900 text-slate-300 border-slate-800"
+                    }`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    {user} {user === username && "(You)"}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-6">
+            {/* Main Column: Create Form & List */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Create Todo Card */}
+              <div className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-xl backdrop-blur">
+                <h2 className="text-base font-semibold text-white mb-3 flex items-center justify-between">
+                  <span>Create New Task</span>
+                  {typingUser && (
+                    <span className="text-xs font-normal text-indigo-400 animate-pulse flex items-center gap-1">
+                      <span>✍️</span> {typingUser} is typing...
+                    </span>
+                  )}
+                </h2>
+
+                <form onSubmit={handleCreateTodo} className="space-y-3">
+                  <div>
+                    <input
+                      type="text"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                      placeholder="What needs to be done? (Real-time synced across tabs)"
+                      value={newTitle}
+                      onChange={handleTitleChange}
+                      disabled={isSubmitting}
+                      required
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Priority Selector */}
+                    <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs">
+                      <span className="text-slate-400">Priority:</span>
+                      <select
+                        value={newPriority}
+                        onChange={(e) => setNewPriority(e.target.value)}
+                        className="bg-transparent text-slate-200 font-medium focus:outline-none cursor-pointer"
+                      >
+                        <option value="LOW" className="bg-slate-900 text-slate-100">Low</option>
+                        <option value="MEDIUM" className="bg-slate-900 text-slate-100">Medium</option>
+                        <option value="HIGH" className="bg-slate-900 text-slate-100">High</option>
+                      </select>
+                    </div>
+
+                    {/* Due Date */}
+                    <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs">
+                      <span className="text-slate-400">Due:</span>
+                      <input
+                        type="date"
+                        value={newDueDate}
+                        onChange={(e) => setNewDueDate(e.target.value)}
+                        className="bg-transparent text-slate-200 text-xs focus:outline-none cursor-pointer"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isSubmitting || !newTitle.trim()}
+                      className="ml-auto inline-flex items-center justify-center px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-semibold text-white shadow-sm transition"
+                    >
+                      {isSubmitting ? "Adding..." : "Add Todo"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Filters & Status Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/40 border border-slate-800/60 p-3 rounded-2xl">
+                {/* Tabs */}
+                <div className="flex items-center gap-1">
+                  {[
+                    { key: "all", label: `All (${counts.total})` },
+                    { key: "active", label: `Active (${counts.active})` },
+                    { key: "completed", label: `Completed (${counts.completed})` },
+                  ].map((tab) => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setFilter(tab.key)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium transition ${
+                        filter === tab.key
+                          ? "bg-indigo-600 text-white shadow-sm"
+                          : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Priority Filter */}
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-slate-400">Filter priority:</span>
+                  <select
+                    value={priorityFilter}
+                    onChange={(e) => setPriorityFilter(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none text-xs cursor-pointer"
+                  >
+                    <option value="all">All Priorities</option>
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Todo Items List */}
+              <div className="space-y-2.5">
+                {loading ? (
+                  <div className="text-center py-12 text-slate-500 text-sm">
+                    Loading collaborative board...
+                  </div>
+                ) : filteredTodos.length === 0 ? (
+                  <div className="text-center py-16 bg-slate-900/30 border border-dashed border-slate-800 rounded-2xl">
+                    <p className="text-slate-400 font-medium">No tasks found</p>
+                    <p className="text-slate-500 text-xs mt-1">
+                      {filter !== "all" || priorityFilter !== "all"
+                        ? "Try resetting your active filters"
+                        : "Create a task above to see real-time synchronization in action"}
+                    </p>
+                  </div>
+                ) : (
+                  filteredTodos.map((todo) => (
+                    <div
+                      key={todo._id}
+                      className={`group flex items-center justify-between p-4 rounded-2xl border transition-all duration-200 ${
+                        todo.completed
+                          ? "bg-slate-950/40 border-slate-900 opacity-60"
+                          : "bg-slate-900/80 border-slate-800/80 hover:border-slate-700 shadow-sm"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        {/* Toggle Checkbox */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleTodo(todo)}
+                          className={`w-5 h-5 rounded-lg border flex items-center justify-center transition-all ${
+                            todo.completed
+                              ? "bg-emerald-500 border-emerald-500 text-white"
+                              : "border-slate-700 hover:border-indigo-400 bg-slate-950"
+                          }`}
+                        >
+                          {todo.completed && (
+                            <svg className="w-3.5 h-3.5 stroke-current" fill="none" viewBox="0 0 24 24" strokeWidth="3">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </button>
+
+                        {/* Title & Metadata */}
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={`text-sm font-medium truncate ${
+                              todo.completed ? "line-through text-slate-500" : "text-slate-200"
+                            }`}
+                          >
+                            {todo.title}
+                          </p>
+
+                          <div className="flex items-center gap-2 mt-1">
+                            {/* Priority Badge */}
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${getPriorityBadgeClass(todo.priority)}`}>
+                              {todo.priority}
+                            </span>
+
+                            {/* Due Date Badge */}
+                            {todo.dueDate && (
+                              <span className="text-[11px] text-slate-400 flex items-center gap-1 font-mono">
+                                📅 {new Date(todo.dueDate).toLocaleDateString()}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Delete Button */}
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteTodo(todo._id)}
+                        className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition"
+                        title="Delete task"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Sidebar Column: Real-time Activity Stream & Explanation */}
+            <div className="space-y-6">
+              {/* Architecture & Workflow Diagram Card */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                  Architectural Contract
+                </h3>
+                <div className="space-y-3 text-xs text-slate-300">
+                  <div className="flex items-start gap-2">
+                    <span className="text-indigo-400 font-bold">1.</span>
+                    <p><strong className="text-white">DB is source of truth:</strong> Client issues REST writes (<code className="text-indigo-300">POST</code>, <code className="text-indigo-300">PATCH</code>, <code className="text-indigo-300">DELETE</code>).</p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-indigo-400 font-bold">2.</span>
+                    <p><strong className="text-white">Socket broadcast:</strong> Server only emits (<code className="text-indigo-300">todo:created</code>, etc.) after MongoDB persists successfully.</p>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <span className="text-indigo-400 font-bold">3.</span>
+                    <p><strong className="text-white">Room Isolation:</strong> All connected peers join <code className="text-indigo-300 font-mono">workspace:default</code>.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Real-time Activity Feed */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Live Event Stream
+                  </h3>
+                  <span className="text-[10px] text-slate-500 font-mono">Real-time</span>
+                </div>
+
+                <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                  {activities.length === 0 ? (
+                    <p className="text-xs text-slate-500 italic py-4 text-center">
+                      Events will appear here when you or other tabs perform actions.
+                    </p>
+                  ) : (
+                    activities.map((act) => (
+                      <div
+                        key={act.id}
+                        className="text-xs p-2 rounded-xl bg-slate-950/60 border border-slate-800/60 flex items-start justify-between gap-2"
+                      >
+                        <span className="text-slate-300 font-medium leading-relaxed">
+                          {act.text}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                          {act.time}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Self-Check Instructions */}
+              <div className="bg-indigo-950/20 border border-indigo-500/20 rounded-2xl p-5 text-xs text-indigo-200/90 space-y-2">
+                <p className="font-semibold text-indigo-300">🧪 Testing Multi-Tab Sync:</p>
+                <ol className="list-decimal list-inside space-y-1 text-slate-300">
+                  <li>Open <code className="text-indigo-300">http://localhost:5000</code> in Tab 1.</li>
+                  <li>Duplicate the tab in another window (Tab 2).</li>
+                  <li>Notice online counter updates to <strong>2 online</strong>.</li>
+                  <li>Add, toggle, or delete a todo in Tab 1 and watch Tab 2 sync instantly!</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "name": "real-time-todo-app",
+  "version": "1.0.0",
+  "description": "Real-time Collaborative TODO Application with Express, TypeScript, MongoDB, and Socket.IO",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "keywords": [
+    "express",
+    "socket.io",
+    "mongodb",
+    "mongoose",
+    "typescript",
+    "real-time"
+  ],
+  "author": "Walker",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongoose": "^8.9.5",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.7",
+    "socket.io-client": "^4.8.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
