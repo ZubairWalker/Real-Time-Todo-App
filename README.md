@@ -72,7 +72,7 @@ Open `.env` and fill in your MongoDB Atlas database username:
 ```env
 PORT=5000
 # Replace <db_username> with your MongoDB Atlas database username
-MONGO_URI=mongodb+srv://<db_username>:Rb27kzE1vJ9djqcz@realtimetodoapp.aqyrdnj.mongodb.net/realtime_todo?retryWrites=true&w=majority
+MONGO_URI=mongodb+srv://<db_username>:<db_password>@realtimetodoapp.aqyrdnj.mongodb.net/realtime_todo?retryWrites=true&w=majority
 NODE_ENV=development
 ```
 

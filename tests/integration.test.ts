@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import express from "express";
 import { Server as SocketIOServer } from "socket.io";
 import { io as ClientSocket, Socket as ClientSocketType } from "socket.io-client";
@@ -22,7 +23,37 @@ const TEST_PORT = 5055;
 const TEST_WORKSPACE = "default";
 const SERVER_URL = `http://localhost:${TEST_PORT}`;
 
-describe("Real-time Collaborative TODO Integration Suite", () => {
+async function isMongoAvailable(): Promise<boolean> {
+  if (process.env.TEST_MONGO_URI) return true;
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(400);
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.on("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.connect(27017, "127.0.0.1");
+  });
+}
+
+const mongoAvailable = await isMongoAvailable();
+
+describe(
+  "Real-time Collaborative TODO Integration Suite",
+  {
+    skip: !mongoAvailable
+      ? "Skipped: MongoDB is not running locally (start mongod or set TEST_MONGO_URI)"
+      : false,
+  },
+  () => {
   let server: http.Server;
   let ioServer: SocketIOServer<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
   let clientA: ClientSocketType<ServerToClientEvents, ClientToServerEvents>;
@@ -31,7 +62,7 @@ describe("Real-time Collaborative TODO Integration Suite", () => {
   before(async () => {
     // Connect to test MongoDB (fallback to localhost:27017/test_realtime)
     const mongoUri = process.env.TEST_MONGO_URI || "mongodb://127.0.0.1:27017/test_realtime_todo";
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 2500 });
 
     // Setup Express App + Socket.IO
     const app = express();
